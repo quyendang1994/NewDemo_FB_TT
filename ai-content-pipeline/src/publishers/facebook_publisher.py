@@ -26,7 +26,10 @@ class FacebookPublisher(BasePublisher):
         url = f"{GRAPH_API}/{config.FACEBOOK_PAGE_ID}/feed"
         try:
             resp = httpx.post(url, data={"message": text, "access_token": config.FACEBOOK_PAGE_ACCESS_TOKEN}, timeout=30)
-            resp.raise_for_status()
+            if not resp.is_success:
+                fb_error = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                logger.error("Facebook API error %d: %s", resp.status_code, fb_error)
+                return PublishResult(platform="facebook", status="failed", error_message=str(fb_error)[:500], published_at=now)
             data = resp.json()
             post_id = data.get("id")
             logger.info("Facebook published: %s", post_id)
@@ -37,5 +40,5 @@ class FacebookPublisher(BasePublisher):
                 published_at=now,
             )
         except Exception as exc:
-            logger.error("Facebook publish failed: %s", type(exc).__name__)
-            return PublishResult(platform="facebook", status="failed", error_message=str(exc)[:200], published_at=now)
+            logger.error("Facebook publish failed: %s", exc)
+            return PublishResult(platform="facebook", status="failed", error_message=str(exc)[:500], published_at=now)

@@ -63,8 +63,41 @@ async def _search_via_mcp(query: str, max_results: int) -> list[dict]:
             elif isinstance(data, dict):
                 results.extend(data.get("results", []))
         except json.JSONDecodeError:
-            logger.warning("Non-JSON MCP response (first 200 chars): %s", text[:200])
+            # Tavily MCP may return plain text: "Title: ...\nURL: ...\nContent: ..."
+            parsed = _parse_text_results(text)
+            if parsed:
+                results.extend(parsed)
+            else:
+                logger.warning("Non-JSON MCP response (first 200 chars): %s", text[:200])
 
+    return results
+
+
+def _parse_text_results(text: str) -> list[dict]:
+    """Parse Tavily MCP plain-text response (Title/URL/Content blocks) into dicts."""
+    import re
+    results: list[dict] = []
+    blocks = re.split(r"\n(?=Title:)", text.strip())
+    for block in blocks:
+        item: dict = {}
+        content_lines: list[str] = []
+        in_content = False
+        for line in block.splitlines():
+            if line.startswith("Title:"):
+                item["title"] = line[6:].strip()
+                in_content = False
+            elif line.startswith("URL:"):
+                item["url"] = line[4:].strip()
+                in_content = False
+            elif line.startswith("Content:"):
+                content_lines = [line[8:].strip()]
+                in_content = True
+            elif in_content:
+                content_lines.append(line)
+        if content_lines:
+            item["content"] = "\n".join(content_lines).strip()
+        if "url" in item:
+            results.append(item)
     return results
 
 

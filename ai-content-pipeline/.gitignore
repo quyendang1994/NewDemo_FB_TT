@@ -14,3 +14,6 @@ output/subtitles/
 dist/
 build/
 .ruff_cache/
+# Claude Code agent mode temp files
+sources.json
+content.json
