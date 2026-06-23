@@ -31,7 +31,7 @@
 
 | Tính năng | Mô tả |
 |-----------|-------|
-| **Tìm kiếm web tự động** | Tích hợp Tavily API, tìm và thu thập tối đa 10 nguồn liên quan |
+| **Tìm kiếm web tự động** | Tích hợp Tavily MCP server (qua `npx`), tìm và thu thập tối đa 10 nguồn liên quan |
 | **Trích xuất nội dung** | Dùng trafilatura + BeautifulSoup4 để trích xuất văn bản từ bài báo |
 | **Khử trùng lặp nguồn** | Loại bỏ các nguồn trùng URL hoặc tiêu đề tương tự |
 | **Tổng hợp nghiên cứu (LLM)** | Claude API tóm tắt, trích dẫn nguồn `[S1]`, `[S2]`, phân tích điểm không chắc chắn |
@@ -62,7 +62,7 @@
      └──────┬──────┘
             │
    ┌────────▼────────┐    ┌──────────────┐
-   │ research_service│───►│ search_service│ ──► Tavily API
+   │ research_service│───►│ search_service│ ──► Tavily MCP (npx)
    └────────┬────────┘    └──────────────┘
             │
    ┌────────▼──────────┐
@@ -175,7 +175,7 @@ ai-content-pipeline/
 │   │                                   #   PublishRecord, get_session_factory()
 │   │
 │   ├── services/
-│   │   ├── search_service.py           # Tavily API / mock search
+│   │   ├── search_service.py           # Tavily MCP server (npx) / mock search
 │   │   ├── research_service.py         # Điều phối pipeline nghiên cứu
 │   │   ├── content_extractor.py        # trafilatura + BS4 extraction
 │   │   ├── source_deduplicator.py      # Khử trùng lặp URL & tiêu đề
@@ -227,6 +227,11 @@ ai-content-pipeline/
 
 ### Python
 - Python **3.11** trở lên
+
+### Node.js & npx (cần để chạy Tavily MCP server)
+- Tải tại: https://nodejs.org/
+- Kiểm tra: `node --version` và `npx --version`
+- Tavily MCP server tự tải về qua `npx -y tavily-mcp@latest` khi lần đầu chạy
 
 ### FFmpeg (tùy chọn, cần để tạo video)
 - Tải tại: https://ffmpeg.org/download.html
@@ -394,7 +399,9 @@ Nhấn **"Lịch sử"** trong sidebar để xem 50 job gần nhất:
 
 ### Tavily (Tìm kiếm web)
 
-- **SDK:** tavily-python
+- **Cơ chế:** Tavily MCP server khởi chạy qua `npx -y tavily-mcp@latest`
+- **Yêu cầu:** Node.js + npx đã cài, biến `TAVILY_API_KEY` trong `.env`
+- **Thư viện Python:** `mcp` (MCP client protocol)
 - **Hành vi khi thiếu key:** Trả về 5 bài báo mẫu cố định về AI
 
 Kết quả trả về dạng:
@@ -518,14 +525,14 @@ output/
 
 | Service | Hành vi khi thiếu key |
 |---------|----------------------|
-| Tavily search | 5 bài báo mẫu về AI (tiếng Việt) |
+| Tavily MCP | 5 bài báo mẫu về AI (tiếng Việt) |
 | Claude LLM | Template nghiên cứu mẫu với trích dẫn giả |
 | Claude content gen | Template Facebook + TikTok mẫu |
 | Facebook publisher | Log "mock publish", trả về `status="mock_published"` |
 | TikTok publisher | Log "mock publish", trả về `status="mock_published"` |
 | FFmpeg | Bỏ qua bước tạo video, hiển thị cảnh báo |
 
-Sidebar hiển thị trạng thái từng service (🟢 OK / 🔴 Mock).
+Sidebar hiển thị trạng thái từng service (✅ Đã cấu hình / ⚠️ Mock mode).
 
 > Để bật đăng bài thật sau khi có đủ credentials: đặt `ENABLE_REAL_PUBLISHING=true` trong `.env`.
 
@@ -720,7 +727,7 @@ streamlit run app.py --server.port 8502
 | pydantic | ≥2.7.0 | Data validation |
 | sqlalchemy | ≥2.0.0 | ORM + SQLite |
 | anthropic | ≥0.25.0 | Claude API |
-| tavily-python | ≥0.3.3 | Web search API |
+| mcp | ≥1.0.0 | MCP client — giao tiếp với Tavily MCP server |
 | trafilatura | ≥1.8.0 | Article extraction |
 | beautifulsoup4 | ≥4.12.0 | HTML parsing fallback |
 | edge-tts | ≥6.1.9 | Text-to-speech |

@@ -11,7 +11,7 @@ def render_sidebar() -> None:
         st.title("⚙️ Trạng thái hệ thống")
         st.markdown("---")
 
-        _status("Tavily Search", bool(config.TAVILY_API_KEY), "✅ Đã cấu hình", "⚠️ Mock mode")
+        _status("Tavily MCP", bool(config.TAVILY_API_KEY), "✅ Đã cấu hình (qua MCP)", "⚠️ Mock mode")
         _status("Anthropic Claude", bool(config.ANTHROPIC_API_KEY), "✅ Đã cấu hình", "⚠️ Mock mode")
         _status(
             "Facebook",

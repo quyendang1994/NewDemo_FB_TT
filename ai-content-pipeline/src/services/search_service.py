@@ -1,6 +1,9 @@
-"""Web search via Tavily API with mock fallback."""
+"""Web search via Tavily MCP server with mock fallback."""
 from __future__ import annotations
+import asyncio
+import json
 import logging
+import os
 from datetime import datetime, timezone
 from src import config
 from src.models.schemas import SourceItem
@@ -16,21 +19,67 @@ MOCK_SOURCES: list[dict] = [
 ]
 
 
+async def _search_via_mcp(query: str, max_results: int) -> list[dict]:
+    """Spawn Tavily MCP server via npx and call its search tool."""
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    env = {**os.environ, "TAVILY_API_KEY": config.TAVILY_API_KEY or ""}
+    server_params = StdioServerParameters(
+        command="npx",
+        args=["-y", "tavily-mcp@latest"],
+        env=env,
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # Discover tool name dynamically (may be "tavily-search" or "tavily_search")
+            tools_response = await session.list_tools()
+            search_tool = next(
+                (t for t in tools_response.tools if "search" in t.name.lower()),
+                None,
+            )
+            if search_tool is None:
+                raise RuntimeError("No search tool found in Tavily MCP server")
+
+            logger.info("Using MCP tool: %s", search_tool.name)
+            result = await session.call_tool(
+                search_tool.name,
+                arguments={"query": query, "max_results": max_results},
+            )
+
+    # Parse MCP text content → list[dict]
+    results: list[dict] = []
+    for content in result.content:
+        text = getattr(content, "text", None)
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                results.extend(data)
+            elif isinstance(data, dict):
+                results.extend(data.get("results", []))
+        except json.JSONDecodeError:
+            logger.warning("Non-JSON MCP response (first 200 chars): %s", text[:200])
+
+    return results
+
+
 def search_web(query: str, max_results: int = 5) -> list[dict]:
-    """Search web using Tavily API; falls back to mock data if key not configured."""
+    """Search web via Tavily MCP server; falls back to mock data if key not configured."""
     if not config.TAVILY_API_KEY:
         logger.warning("TAVILY_API_KEY not set — returning mock search results")
         return MOCK_SOURCES[:max_results]
 
     try:
-        from tavily import TavilyClient
-        client = TavilyClient(api_key=config.TAVILY_API_KEY)
-        response = client.search(query=query, max_results=max_results, include_domains=[], exclude_domains=[])
-        results = response.get("results", [])
-        logger.info("Tavily returned %d results", len(results))
-        return results
+        results = asyncio.run(_search_via_mcp(query, max_results))
+        logger.info("Tavily MCP returned %d results", len(results))
+        return results or MOCK_SOURCES[:max_results]
     except Exception as exc:
-        logger.error("Tavily search failed: %s — falling back to mock", exc)
+        logger.error("Tavily MCP search failed: %s — falling back to mock", exc)
         return MOCK_SOURCES[:max_results]
 
 
