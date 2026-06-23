@@ -23,16 +23,30 @@ class FacebookPublisher(BasePublisher):
             return PublishResult(platform="facebook", status="mock_published", published_at=now)
 
         text = f"{post.title}\n\n{post.body}\n\n{chr(10).join(post.hashtags)}"
-        url = f"{GRAPH_API}/{config.FACEBOOK_PAGE_ID}/feed"
+        token = config.FACEBOOK_PAGE_ACCESS_TOKEN
+        page_id = config.FACEBOOK_PAGE_ID
+
+        # Photo post if image_path provided
+        if post.image_path:
+            from pathlib import Path as _Path
+            img_file = _Path(post.image_path)
+            if img_file.exists():
+                return self._publish_photo(img_file, text, page_id, token, now)
+            else:
+                logger.warning("image_path not found, falling back to text post: %s", post.image_path)
+
+        return self._publish_text(text, page_id, token, now)
+
+    def _publish_text(self, text: str, page_id: str, token: str, now) -> PublishResult:
+        url = f"{GRAPH_API}/{page_id}/feed"
         try:
-            resp = httpx.post(url, data={"message": text, "access_token": config.FACEBOOK_PAGE_ACCESS_TOKEN}, timeout=30)
+            resp = httpx.post(url, data={"message": text, "access_token": token}, timeout=30)
             if not resp.is_success:
                 fb_error = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
                 logger.error("Facebook API error %d: %s", resp.status_code, fb_error)
                 return PublishResult(platform="facebook", status="failed", error_message=str(fb_error)[:500], published_at=now)
-            data = resp.json()
-            post_id = data.get("id")
-            logger.info("Facebook published: %s", post_id)
+            post_id = resp.json().get("id")
+            logger.info("Facebook text post published: %s", post_id)
             return PublishResult(
                 platform="facebook", status="published",
                 external_post_id=post_id,
@@ -41,4 +55,30 @@ class FacebookPublisher(BasePublisher):
             )
         except Exception as exc:
             logger.error("Facebook publish failed: %s", exc)
+            return PublishResult(platform="facebook", status="failed", error_message=str(exc)[:500], published_at=now)
+
+    def _publish_photo(self, img_file, caption: str, page_id: str, token: str, now) -> PublishResult:
+        url = f"{GRAPH_API}/{page_id}/photos"
+        try:
+            with open(img_file, "rb") as f:
+                resp = httpx.post(
+                    url,
+                    data={"caption": caption, "access_token": token},
+                    files={"source": (img_file.name, f, "image/jpeg")},
+                    timeout=60,
+                )
+            if not resp.is_success:
+                fb_error = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                logger.error("Facebook photo API error %d: %s", resp.status_code, fb_error)
+                return PublishResult(platform="facebook", status="failed", error_message=str(fb_error)[:500], published_at=now)
+            post_id = resp.json().get("post_id") or resp.json().get("id")
+            logger.info("Facebook photo post published: %s", post_id)
+            return PublishResult(
+                platform="facebook", status="published",
+                external_post_id=str(post_id),
+                external_url=f"https://www.facebook.com/{post_id}",
+                published_at=now,
+            )
+        except Exception as exc:
+            logger.error("Facebook photo publish failed: %s", exc)
             return PublishResult(platform="facebook", status="failed", error_message=str(exc)[:500], published_at=now)

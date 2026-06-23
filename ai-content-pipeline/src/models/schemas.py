@@ -33,6 +33,7 @@ class FacebookPost(BaseModel):
     body: str
     hashtags: list[str]
     source_references: list[str]
+    image_path: str | None = None
 
 
 class TikTokScene(BaseModel):

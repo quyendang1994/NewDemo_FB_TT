@@ -78,6 +78,239 @@ def cmd_gather(args: argparse.Namespace) -> None:
     print(f"[gather] {len(final)} sources saved -> {out_path}")
 
 
+def _draw_wrapped_text(draw, text: str, font, canvas_w: int, y_start: int, max_w: int) -> None:
+    """Draw word-wrapped text centered horizontally."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        test = f"{current} {word}".strip()
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] <= max_w:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+
+    y = y_start
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        x = (canvas_w - bbox[2]) // 2
+        draw.text((x, y), line, fill="white", font=font)
+        y += bbox[3] + 14
+
+
+def cmd_synthesize(args: argparse.Namespace) -> None:
+    """Call Claude Code CLI (-p) to synthesize sources.json -> content.json.
+    Uses the user's Claude Code subscription — no Anthropic API key needed.
+    """
+    import re
+    import shutil
+    import subprocess as sp
+
+    sources_path = Path(args.sources_file)
+    if not sources_path.exists():
+        print(f"ERROR: File not found: {sources_path}", file=sys.stderr)
+        sys.exit(1)
+
+    data = json.loads(sources_path.read_text(encoding="utf-8"))
+    topic = data.get("topic", "")
+    language = data.get("language", args.language)
+    sources = data.get("sources", [])
+    lang_name = "Vietnamese" if language == "vi" else "English"
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        print("ERROR: 'claude' CLI not found in PATH. Install Claude Code first.", file=sys.stderr)
+        sys.exit(1)
+
+    sources_text = ""
+    for s in sources:
+        sources_text += (
+            f"\n---\n[{s['source_id']}] {s['title']}\n"
+            f"URL: {s['url']}\n"
+            f"{s.get('content', '')[:2000]}\n"
+        )
+
+    prompt = (
+        f"You are a professional social media content creator writing in {lang_name}.\n"
+        f"Topic: {topic}\n\n"
+        f"Research sources:\n{sources_text}\n\n"
+        "Based on the research above, generate a JSON object with EXACTLY this structure.\n"
+        "Output ONLY valid JSON — no markdown fences, no explanation, nothing else.\n\n"
+        "{\n"
+        '  "facebook": {\n'
+        '    "title": "engaging post title",\n'
+        '    "body": "post body 300-500 words",\n'
+        '    "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],\n'
+        '    "source_references": ["domain1.com", "domain2.com"]\n'
+        "  },\n"
+        '  "tiktok": {\n'
+        '    "hook": "hook under 10 words",\n'
+        '    "narration_script": "full 60-90s narration",\n'
+        '    "caption": "caption under 150 chars",\n'
+        '    "hashtags": ["#tag1", "#tag2", "#tag3"],\n'
+        '    "call_to_action": "CTA text",\n'
+        '    "scenes": [\n'
+        '      {"scene_number": 1, "duration_seconds": 5, "narration": "...", "on_screen_text": "..."},\n'
+        '      {"scene_number": 2, "duration_seconds": 8, "narration": "...", "on_screen_text": "..."},\n'
+        '      {"scene_number": 3, "duration_seconds": 8, "narration": "...", "on_screen_text": "..."},\n'
+        '      {"scene_number": 4, "duration_seconds": 7, "narration": "...", "on_screen_text": "..."},\n'
+        '      {"scene_number": 5, "duration_seconds": 7, "narration": "...", "on_screen_text": "..."}\n'
+        "    ]\n"
+        "  },\n"
+        f'  "language": "{language}",\n'
+        f'  "topic": "{topic}"\n'
+        "}"
+    )
+
+    print(f"[synthesize] Calling Claude Code CLI (claude -p) ...")
+    try:
+        result = sp.run(
+            [claude_bin, "-p", prompt],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
+    except sp.TimeoutExpired:
+        print("ERROR: Claude CLI timed out after 300s", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"ERROR: Failed to run claude CLI: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if result.returncode != 0:
+        print(f"ERROR: claude CLI returned {result.returncode}", file=sys.stderr)
+        print(result.stderr[:1000], file=sys.stderr)
+        sys.exit(1)
+
+    output = result.stdout.strip()
+
+    # Extract JSON — Claude may wrap in markdown fences
+    try:
+        content = json.loads(output)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", output)
+        if not match:
+            print("ERROR: No JSON found in Claude output", file=sys.stderr)
+            print("Output was:", output[:500], file=sys.stderr)
+            sys.exit(1)
+        try:
+            content = json.loads(match.group())
+        except json.JSONDecodeError as exc:
+            print(f"ERROR: Invalid JSON: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    out_path = Path(args.output)
+    out_path.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[synthesize] content.json saved -> {out_path}")
+
+
+def cmd_build_image(args: argparse.Namespace) -> None:
+    """Build Facebook card image (1200x628) from content.json using Pillow."""
+    import hashlib
+    import uuid
+
+    path = Path(args.content_file)
+    if not path.exists():
+        print(f"ERROR: File not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    fb = data.get("facebook", {})
+    if not fb:
+        print("ERROR: No 'facebook' field in content.json", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("ERROR: Pillow not installed — run: pip install Pillow", file=sys.stderr)
+        sys.exit(1)
+
+    from src import config
+
+    title = fb.get("title", "Bài viết")
+    hashtags = "  ".join(fb.get("hashtags", [])[:5])
+
+    W, H = 1200, 628
+    BG_COLORS = ["#1a1a2e", "#0f3460", "#16213e", "#2c3e50", "#1b2838"]
+    ACCENT_COLORS = ["#e94560", "#f5a623", "#3b82f6", "#22c55e", "#a855f7"]
+    idx = int(hashlib.md5(title.encode()).hexdigest(), 16) % len(BG_COLORS)
+    bg = BG_COLORS[idx]
+    accent = ACCENT_COLORS[idx]
+
+    img = Image.new("RGB", (W, H), color=bg)
+    draw = ImageDraw.Draw(img)
+
+    # Left accent bar
+    draw.rectangle([0, 0, 10, H], fill=accent)
+    # Bottom accent bar
+    draw.rectangle([0, H - 10, W, H], fill=accent)
+
+    try:
+        title_font = ImageFont.truetype("arial.ttf", 56)
+        tag_font = ImageFont.truetype("arial.ttf", 32)
+    except Exception:
+        title_font = ImageFont.load_default()
+        tag_font = title_font
+
+    _draw_wrapped_text(draw, title, title_font, W, H // 2 - 80, W - 160)
+
+    if hashtags:
+        bbox = draw.textbbox((0, 0), hashtags, font=tag_font)
+        x = (W - bbox[2]) // 2
+        draw.text((x, H - 80), hashtags, fill=accent, font=tag_font)
+
+    out_dir = config.OUTPUT_DIR / "images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    job_id = args.job_id or f"fb_{uuid.uuid4().hex[:8]}"
+    out_path = out_dir / f"{job_id}_card.jpg"
+    img.save(str(out_path), quality=95)
+
+    print(f"[build-image] Image saved: {out_path}")
+    data["image_path"] = str(out_path)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cmd_build_video(args: argparse.Namespace) -> None:
+    """Build TikTok video from content.json (requires FFmpeg + Pillow)."""
+    import uuid
+    from src.models.schemas import TikTokPackage
+    from src.services.video_builder import build_video
+
+    path = Path(args.content_file)
+    if not path.exists():
+        print(f"ERROR: File not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    tk = data.get("tiktok", {})
+    if not tk:
+        print("ERROR: No 'tiktok' field in content.json", file=sys.stderr)
+        sys.exit(1)
+
+    package = TikTokPackage.model_validate(tk)
+    language = data.get("language", args.language)
+    job_id = args.job_id or f"job_{uuid.uuid4().hex[:8]}"
+
+    logger.info("Building TikTok video for job: %s", job_id)
+    result = build_video(package, job_id, language)
+
+    if result:
+        print(f"[build-video] Video saved: {result}")
+        data["video_path"] = result
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    else:
+        print("ERROR: Video build failed — check FFmpeg and Pillow installation", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_publish(args: argparse.Namespace) -> None:
     """Read content.json and publish to Facebook."""
     from src.models.schemas import FacebookPost
@@ -96,6 +329,7 @@ def cmd_publish(args: argparse.Namespace) -> None:
         body=fb.get("body", ""),
         hashtags=fb.get("hashtags", []),
         source_references=fb.get("source_references", []),
+        image_path=data.get("image_path"),
     )
 
     result = FacebookPublisher().publish(post)
@@ -121,6 +355,23 @@ def main() -> None:
     g.add_argument("--max-sources", type=int, default=5, help="Max number of sources")
     g.add_argument("--output", default="sources.json", help="Output file (default: sources.json)")
     g.set_defaults(func=cmd_gather)
+
+    sy = sub.add_parser("synthesize", help="Call Claude Code CLI to synthesize sources.json -> content.json")
+    sy.add_argument("--sources-file", default="sources.json", help="Input sources file (default: sources.json)")
+    sy.add_argument("--output", default="content.json", help="Output content file (default: content.json)")
+    sy.add_argument("--language", default="vi", help="Language (default: vi)")
+    sy.set_defaults(func=cmd_synthesize)
+
+    bi = sub.add_parser("build-image", help="Build Facebook card image 1200x628 from content.json (needs Pillow)")
+    bi.add_argument("--content-file", default="content.json", help="Content file (default: content.json)")
+    bi.add_argument("--job-id", default="", help="Job ID prefix for output file name")
+    bi.set_defaults(func=cmd_build_image)
+
+    bv = sub.add_parser("build-video", help="Build TikTok MP4 from content.json (needs FFmpeg)")
+    bv.add_argument("--content-file", default="content.json", help="Content file (default: content.json)")
+    bv.add_argument("--language", default="vi", help="Language for TTS (default: vi)")
+    bv.add_argument("--job-id", default="", help="Job ID prefix for output files")
+    bv.set_defaults(func=cmd_build_video)
 
     p = sub.add_parser("publish", help="Post content.json to social platforms")
     p.add_argument("--content-file", default="content.json", help="Content file to publish")
