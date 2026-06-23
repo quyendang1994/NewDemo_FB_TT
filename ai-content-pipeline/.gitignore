@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+data/app.db
+output/audio/
+output/videos/
+output/images/
+output/subtitles/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.ruff_cache/
