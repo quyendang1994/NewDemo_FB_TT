@@ -58,50 +58,59 @@ class FacebookPublisher(BasePublisher):
             return PublishResult(platform="facebook", status="failed", error_message=str(exc)[:500], published_at=now)
 
     def _publish_photo(self, img_file, caption: str, page_id: str, token: str, now) -> PublishResult:
-        # Step 1: Upload photo as unpublished to get a photo_id for a standalone feed post.
-        # This prevents Facebook from bundling multiple photo uploads into one album story.
+        import json as _json
         upload_url = f"{GRAPH_API}/{page_id}/photos"
-        try:
-            with open(img_file, "rb") as f:
-                upload_resp = httpx.post(
-                    upload_url,
-                    data={"published": "false", "access_token": token},
-                    files={"source": (img_file.name, f, "image/jpeg")},
-                    timeout=60,
-                )
 
-            upload_data = upload_resp.json() if upload_resp.headers.get("content-type", "").startswith("application/json") else {}
-            logger.info("Photo upload response: %s", upload_data)
-
-            if upload_resp.is_success:
-                photo_id = upload_data.get("id") or upload_data.get("photo_id")
-                # Validate: photo_id must be a numeric string and not the page_id itself
-                if photo_id and str(photo_id) != str(page_id) and str(photo_id).isdigit():
-                    # Step 2: Create a standalone feed post with the photo attached
-                    feed_resp = httpx.post(
-                        f"{GRAPH_API}/{page_id}/feed",
-                        data={"message": caption, "object_attachment": photo_id, "access_token": token},
-                        timeout=30,
+        # Try two strategies to get a valid photo_id for a standalone feed post.
+        # Both avoid creating a photo album story that Facebook bundles across runs.
+        # Strategy A: no_story=true — photo lands in album but no news-feed story is created.
+        # Strategy B: published=false — photo is staged/draft only, also no story.
+        photo_id = None
+        for label, extra_data in [("no_story", {"no_story": "true"}), ("unpublished", {"published": "false"})]:
+            try:
+                with open(img_file, "rb") as f:
+                    up = httpx.post(
+                        upload_url,
+                        data={**extra_data, "access_token": token},
+                        files={"source": (img_file.name, f, "image/jpeg")},
+                        timeout=60,
                     )
-                    if feed_resp.is_success:
-                        post_id = feed_resp.json().get("id")
-                        logger.info("Facebook photo post published (2-step): %s", post_id)
+                logger.info("[upload/%s] status=%d body=%s", label, up.status_code, up.text[:500])
+                if up.is_success:
+                    data = up.json() if "json" in up.headers.get("content-type", "") else {}
+                    pid = str(data.get("id") or data.get("photo_id") or "")
+                    if pid and pid != str(page_id) and pid.isdigit():
+                        photo_id = pid
+                        logger.info("[upload/%s] valid photo_id=%s", label, photo_id)
+                        break
+                    logger.warning("[upload/%s] bad photo_id=%r (page_id=%s)", label, pid, page_id)
+            except Exception as exc:
+                logger.warning("[upload/%s] error: %s", label, exc)
+
+        if photo_id:
+            # Try object_attachment first, then attached_media JSON format
+            for feed_label, feed_data in [
+                ("object_attachment", {"message": caption, "object_attachment": photo_id, "access_token": token}),
+                ("attached_media", {"message": caption, "attached_media": _json.dumps([{"media_fbid": photo_id}]), "access_token": token}),
+            ]:
+                try:
+                    feed = httpx.post(f"{GRAPH_API}/{page_id}/feed", data=feed_data, timeout=30)
+                    logger.info("[feed/%s] status=%d body=%s", feed_label, feed.status_code, feed.text[:500])
+                    if feed.is_success:
+                        post_id = feed.json().get("id")
+                        logger.info("Facebook photo post published (2-step/%s): %s", feed_label, post_id)
                         return PublishResult(
                             platform="facebook", status="published",
                             external_post_id=str(post_id),
                             external_url=f"https://www.facebook.com/{post_id}",
                             published_at=now,
                         )
-                    logger.warning("2-step feed post failed (%d), falling back to direct photo post", feed_resp.status_code)
-                else:
-                    logger.warning("Invalid photo_id from upload (%s), falling back to direct photo post", photo_id)
-            else:
-                logger.warning("Photo upload failed (%d), falling back to direct photo post", upload_resp.status_code)
+                    logger.warning("[feed/%s] failed, trying next", feed_label)
+                except Exception as exc:
+                    logger.warning("[feed/%s] error: %s", feed_label, exc)
 
-        except Exception as exc:
-            logger.warning("2-step photo publish error: %s — falling back to direct photo post", exc)
-
-        # Fallback: direct photo post (creates story immediately, may bundle with other photos)
+        # Fallback: direct photo post (creates album story — may bundle across pipeline runs)
+        logger.warning("All 2-step strategies failed — falling back to direct photo post (may bundle)")
         try:
             with open(img_file, "rb") as f:
                 resp = httpx.post(
@@ -110,8 +119,9 @@ class FacebookPublisher(BasePublisher):
                     files={"source": (img_file.name, f, "image/jpeg")},
                     timeout=60,
                 )
+            logger.info("[direct] status=%d body=%s", resp.status_code, resp.text[:500])
             if not resp.is_success:
-                fb_error = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                fb_error = resp.json() if "json" in resp.headers.get("content-type", "") else resp.text
                 logger.error("Facebook photo API error %d: %s", resp.status_code, fb_error)
                 return PublishResult(platform="facebook", status="failed", error_message=str(fb_error)[:500], published_at=now)
             post_id = resp.json().get("post_id") or resp.json().get("id")
