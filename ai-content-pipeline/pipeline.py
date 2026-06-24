@@ -168,14 +168,16 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
     )
 
     print(f"[synthesize] Calling Claude Code CLI (claude -p) ...")
+    env = {k: v for k, v in __import__("os").environ.items() if k != "ANTHROPIC_API_KEY"}
     try:
         result = sp.run(
-            [claude_bin, "-p", prompt],
+            [claude_bin, "-p", prompt, "--output-format", "text", "--dangerously-skip-permissions"],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=300,
+            env=env,
         )
     except sp.TimeoutExpired:
         print("ERROR: Claude CLI timed out after 300s", file=sys.stderr)
@@ -189,22 +191,39 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         print(result.stderr[:1000], file=sys.stderr)
         sys.exit(1)
 
-    output = result.stdout.strip()
+    # Strip ANSI escape codes that Claude CLI may inject
+    ansi_re = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    output = ansi_re.sub("", result.stdout).strip()
 
-    # Extract JSON — Claude may wrap in markdown fences
-    try:
-        content = json.loads(output)
-    except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", output)
-        if not match:
-            print("ERROR: No JSON found in Claude output", file=sys.stderr)
-            print("Output was:", output[:500], file=sys.stderr)
-            sys.exit(1)
+    def _extract_json(text: str) -> dict | None:
+        # 1. Direct parse
         try:
-            content = json.loads(match.group())
-        except json.JSONDecodeError as exc:
-            print(f"ERROR: Invalid JSON: {exc}", file=sys.stderr)
-            sys.exit(1)
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        # 2. Inside ```json ... ``` fences
+        m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+        # 3. Largest { ... } block (greedy from first { to last })
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    content = _extract_json(output)
+    if content is None:
+        print("ERROR: No valid JSON found in Claude output", file=sys.stderr)
+        print("--- raw output (first 1000 chars) ---", file=sys.stderr)
+        print(output[:1000], file=sys.stderr)
+        sys.exit(1)
 
     out_path = Path(args.output)
     out_path.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
