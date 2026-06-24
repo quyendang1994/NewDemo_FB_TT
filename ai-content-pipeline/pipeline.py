@@ -343,6 +343,68 @@ def cmd_publish(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_run(args: argparse.Namespace) -> None:
+    """Run the full pipeline end-to-end: gather → synthesize → build-image → build-video → publish."""
+    import uuid
+    job_id = f"job_{uuid.uuid4().hex[:8]}"
+
+    print(f"\n{'='*60}")
+    print(f"  AI Content Pipeline — chủ đề: {args.topic}")
+    print(f"  job_id: {job_id}")
+    print(f"{'='*60}\n")
+
+    # Step 1: gather
+    print("[1/5] Thu thập nguồn từ web...")
+    gather_args = argparse.Namespace(
+        topic=args.topic,
+        language=args.language,
+        max_sources=args.max_sources,
+        output=args.sources_file,
+    )
+    cmd_gather(gather_args)
+
+    # Step 2: synthesize
+    print("\n[2/5] Tổng hợp và tạo nội dung (Claude Code)...")
+    synth_args = argparse.Namespace(
+        sources_file=args.sources_file,
+        output=args.content_file,
+        language=args.language,
+    )
+    cmd_synthesize(synth_args)
+
+    # Step 3: build-image
+    print("\n[3/5] Tạo ảnh card Facebook...")
+    image_args = argparse.Namespace(
+        content_file=args.content_file,
+        job_id=job_id,
+    )
+    try:
+        cmd_build_image(image_args)
+    except SystemExit:
+        print("[3/5] Bỏ qua — lỗi tạo ảnh (xem log ở trên)")
+
+    # Step 4: build-video
+    print("\n[4/5] Tạo video TikTok...")
+    video_args = argparse.Namespace(
+        content_file=args.content_file,
+        language=args.language,
+        job_id=job_id,
+    )
+    try:
+        cmd_build_video(video_args)
+    except SystemExit:
+        print("[4/5] Bỏ qua — FFmpeg chưa cài hoặc lỗi tạo video")
+
+    # Step 5: publish
+    print("\n[5/5] Đăng lên Facebook...")
+    pub_args = argparse.Namespace(content_file=args.content_file)
+    cmd_publish(pub_args)
+
+    print(f"\n{'='*60}")
+    print("  Hoàn thành!")
+    print(f"{'='*60}\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="AI Content Pipeline CLI (Claude Code agent mode)"
@@ -376,6 +438,14 @@ def main() -> None:
     p = sub.add_parser("publish", help="Post content.json to social platforms")
     p.add_argument("--content-file", default="content.json", help="Content file to publish")
     p.set_defaults(func=cmd_publish)
+
+    r = sub.add_parser("run", help="Run full pipeline: gather -> synthesize -> build-image -> build-video -> publish")
+    r.add_argument("--topic", required=True, help="Research topic")
+    r.add_argument("--language", default="vi", help="Output language: vi or en (default: vi)")
+    r.add_argument("--max-sources", type=int, default=5, help="Max number of sources (default: 5)")
+    r.add_argument("--sources-file", default="sources.json", help="Temp sources file (default: sources.json)")
+    r.add_argument("--content-file", default="content.json", help="Temp content file (default: content.json)")
+    r.set_defaults(func=cmd_run)
 
     ns = parser.parse_args()
     ns.func(ns)
