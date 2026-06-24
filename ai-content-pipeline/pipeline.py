@@ -104,16 +104,24 @@ def _draw_wrapped_text(draw, text: str, font, canvas_w: int, y_start: int, max_w
 
 
 def cmd_synthesize(args: argparse.Namespace) -> None:
-    """Call Claude Code CLI (-p) to synthesize sources.json -> content.json.
-    Uses the user's Claude Code subscription — no Anthropic API key needed.
-    """
+    """Call Anthropic SDK to synthesize sources.json -> content.json."""
+    import os
     import re
-    import shutil
-    import subprocess as sp
+
+    try:
+        import anthropic
+    except ImportError:
+        print("ERROR: anthropic package not installed — run: pip install anthropic", file=sys.stderr)
+        sys.exit(1)
 
     sources_path = Path(args.sources_file)
     if not sources_path.exists():
         print(f"ERROR: File not found: {sources_path}", file=sys.stderr)
+        sys.exit(1)
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("ERROR: ANTHROPIC_API_KEY not set in .env", file=sys.stderr)
         sys.exit(1)
 
     data = json.loads(sources_path.read_text(encoding="utf-8"))
@@ -121,11 +129,6 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
     language = data.get("language", args.language)
     sources = data.get("sources", [])
     lang_name = "Vietnamese" if language == "vi" else "English"
-
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        print("ERROR: 'claude' CLI not found in PATH. Install Claude Code first.", file=sys.stderr)
-        sys.exit(1)
 
     sources_text = ""
     for s in sources:
@@ -167,50 +170,37 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
         "}"
     )
 
-    print(f"[synthesize] Calling Claude Code CLI (claude -p) ...")
-    env = {k: v for k, v in __import__("os").environ.items() if k != "ANTHROPIC_API_KEY"}
+    from src import config
+    model = getattr(config, "ANTHROPIC_MODEL", None) or "claude-sonnet-4-6"
+    print(f"[synthesize] Calling Anthropic SDK (model={model}) ...")
+
     try:
-        result = sp.run(
-            [claude_bin, "-p", prompt, "--output-format", "text", "--dangerously-skip-permissions"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-            env=env,
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
         )
-    except sp.TimeoutExpired:
-        print("ERROR: Claude CLI timed out after 300s", file=sys.stderr)
+        output = message.content[0].text.strip()
+    except anthropic.APIError as exc:
+        print(f"ERROR: Anthropic API error: {exc}", file=sys.stderr)
         sys.exit(1)
     except Exception as exc:
-        print(f"ERROR: Failed to run claude CLI: {exc}", file=sys.stderr)
+        print(f"ERROR: Failed to call Anthropic SDK: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    if result.returncode != 0:
-        print(f"ERROR: claude CLI returned {result.returncode}", file=sys.stderr)
-        print(result.stderr[:1000], file=sys.stderr)
-        sys.exit(1)
-
-    # Strip ANSI escape codes that Claude CLI may inject
-    ansi_re = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-    output = ansi_re.sub("", result.stdout).strip()
 
     def _extract_json(text: str) -> dict | None:
-        # 1. Direct parse
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-        # 2. Inside ```json ... ``` fences
         m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
         if m:
             try:
                 return json.loads(m.group(1))
             except json.JSONDecodeError:
                 pass
-        # 3. Largest { ... } block (greedy from first { to last })
-        start = text.find("{")
-        end = text.rfind("}")
+        start, end = text.find("{"), text.rfind("}")
         if start != -1 and end != -1 and end > start:
             try:
                 return json.loads(text[start : end + 1])
@@ -220,7 +210,7 @@ def cmd_synthesize(args: argparse.Namespace) -> None:
 
     content = _extract_json(output)
     if content is None:
-        print("ERROR: No valid JSON found in Claude output", file=sys.stderr)
+        print("ERROR: No valid JSON found in API response", file=sys.stderr)
         print("--- raw output (first 1000 chars) ---", file=sys.stderr)
         print(output[:1000], file=sys.stderr)
         sys.exit(1)
