@@ -58,8 +58,8 @@ class FacebookPublisher(BasePublisher):
             return PublishResult(platform="facebook", status="failed", error_message=str(exc)[:500], published_at=now)
 
     def _publish_photo(self, img_file, caption: str, page_id: str, token: str, now) -> PublishResult:
-        import json as _json
-        # Step 1: Upload photo as unpublished — avoids Facebook album bundling
+        # Step 1: Upload photo as unpublished to get a photo_id for a standalone feed post.
+        # This prevents Facebook from bundling multiple photo uploads into one album story.
         upload_url = f"{GRAPH_API}/{page_id}/photos"
         try:
             with open(img_file, "rb") as f:
@@ -69,32 +69,53 @@ class FacebookPublisher(BasePublisher):
                     files={"source": (img_file.name, f, "image/jpeg")},
                     timeout=60,
                 )
-            if not upload_resp.is_success:
-                fb_error = upload_resp.json() if upload_resp.headers.get("content-type", "").startswith("application/json") else upload_resp.text
-                logger.error("Facebook photo upload error %d: %s", upload_resp.status_code, fb_error)
+
+            upload_data = upload_resp.json() if upload_resp.headers.get("content-type", "").startswith("application/json") else {}
+            logger.info("Photo upload response: %s", upload_data)
+
+            if upload_resp.is_success:
+                photo_id = upload_data.get("id") or upload_data.get("photo_id")
+                # Validate: photo_id must be a numeric string and not the page_id itself
+                if photo_id and str(photo_id) != str(page_id) and str(photo_id).isdigit():
+                    # Step 2: Create a standalone feed post with the photo attached
+                    feed_resp = httpx.post(
+                        f"{GRAPH_API}/{page_id}/feed",
+                        data={"message": caption, "object_attachment": photo_id, "access_token": token},
+                        timeout=30,
+                    )
+                    if feed_resp.is_success:
+                        post_id = feed_resp.json().get("id")
+                        logger.info("Facebook photo post published (2-step): %s", post_id)
+                        return PublishResult(
+                            platform="facebook", status="published",
+                            external_post_id=str(post_id),
+                            external_url=f"https://www.facebook.com/{post_id}",
+                            published_at=now,
+                        )
+                    logger.warning("2-step feed post failed (%d), falling back to direct photo post", feed_resp.status_code)
+                else:
+                    logger.warning("Invalid photo_id from upload (%s), falling back to direct photo post", photo_id)
+            else:
+                logger.warning("Photo upload failed (%d), falling back to direct photo post", upload_resp.status_code)
+
+        except Exception as exc:
+            logger.warning("2-step photo publish error: %s — falling back to direct photo post", exc)
+
+        # Fallback: direct photo post (creates story immediately, may bundle with other photos)
+        try:
+            with open(img_file, "rb") as f:
+                resp = httpx.post(
+                    upload_url,
+                    data={"caption": caption, "access_token": token},
+                    files={"source": (img_file.name, f, "image/jpeg")},
+                    timeout=60,
+                )
+            if not resp.is_success:
+                fb_error = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                logger.error("Facebook photo API error %d: %s", resp.status_code, fb_error)
                 return PublishResult(platform="facebook", status="failed", error_message=str(fb_error)[:500], published_at=now)
-
-            photo_id = upload_resp.json().get("id")
-            if not photo_id:
-                return PublishResult(platform="facebook", status="failed", error_message="No photo_id in upload response", published_at=now)
-
-            # Step 2: Create standalone feed post with photo attached
-            feed_resp = httpx.post(
-                f"{GRAPH_API}/{page_id}/feed",
-                data={
-                    "message": caption,
-                    "attached_media": _json.dumps([{"media_fbid": photo_id}]),
-                    "access_token": token,
-                },
-                timeout=30,
-            )
-            if not feed_resp.is_success:
-                fb_error = feed_resp.json() if feed_resp.headers.get("content-type", "").startswith("application/json") else feed_resp.text
-                logger.error("Facebook feed post error %d: %s", feed_resp.status_code, fb_error)
-                return PublishResult(platform="facebook", status="failed", error_message=str(fb_error)[:500], published_at=now)
-
-            post_id = feed_resp.json().get("id")
-            logger.info("Facebook photo post published: %s", post_id)
+            post_id = resp.json().get("post_id") or resp.json().get("id")
+            logger.info("Facebook photo post published (direct): %s", post_id)
             return PublishResult(
                 platform="facebook", status="published",
                 external_post_id=str(post_id),
