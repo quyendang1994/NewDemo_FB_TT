@@ -10,20 +10,21 @@ Vận hành theo mô hình **Claude Code Agent**: Claude Code (dùng subscriptio
 
 1. [Tính năng](#tính-năng)
 2. [Kiến trúc](#kiến-trúc)
-3. [Cấu trúc dự án](#cấu-trúc-dự-án)
-4. [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
-5. [Cài đặt](#cài-đặt)
-6. [Cấu hình biến môi trường](#cấu-hình-biến-môi-trường)
-7. [Cách dùng nhanh — Slash command](#cách-dùng-nhanh--slash-command)
-8. [Chạy thủ công từng bước](#chạy-thủ-công-từng-bước)
-9. [Tích hợp API](#tích-hợp-api)
-10. [Tạo ảnh và video](#tạo-ảnh-và-video)
-11. [Chế độ Mock](#chế-độ-mock)
-12. [Kiểm thử](#kiểm-thử)
-13. [Linting & Code Quality](#linting--code-quality)
-14. [Giới hạn & lưu ý](#giới-hạn--lưu-ý)
-15. [Xử lý sự cố](#xử-lý-sự-cố)
-16. [Thư viện chính](#thư-viện-chính)
+3. [Thứ tự chạy các hàm](#thứ-tự-chạy-các-hàm)
+4. [Cấu trúc dự án](#cấu-trúc-dự-án)
+5. [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
+6. [Cài đặt](#cài-đặt)
+7. [Cấu hình biến môi trường](#cấu-hình-biến-môi-trường)
+8. [Cách dùng nhanh — Slash command](#cách-dùng-nhanh--slash-command)
+9. [Chạy thủ công từng bước](#chạy-thủ-công-từng-bước)
+10. [Tích hợp API](#tích-hợp-api)
+11. [Tạo ảnh và video](#tạo-ảnh-và-video)
+12. [Chế độ Mock](#chế-độ-mock)
+13. [Kiểm thử](#kiểm-thử)
+14. [Linting & Code Quality](#linting--code-quality)
+15. [Giới hạn & lưu ý](#giới-hạn--lưu-ý)
+16. [Xử lý sự cố](#xử-lý-sự-cố)
+17. [Thư viện chính](#thư-viện-chính)
 
 ---
 
@@ -66,6 +67,64 @@ python pipeline.py gather          python pipeline.py synthesize
 ```
 
 Claude Code đọc `sources.json` và tạo `content.json` — không gọi Anthropic API, chạy trực tiếp trong context của Claude Code.
+
+---
+
+## Thứ tự chạy các hàm
+
+Khi chạy `python pipeline.py run --topic "..."`, các hàm được gọi theo thứ tự sau:
+
+```
+main()
+│
+└── cmd_run()                            # điểm vào khi dùng lệnh "run"
+    │
+    ├── [1/5] cmd_gather()               # tìm kiếm web, không gọi LLM
+    │         ├── search_service.search_web()          # gọi Tavily API
+    │         ├── content_extractor.extract_content()  # scrape từng URL
+    │         ├── source_deduplicator.deduplicate_sources()
+    │         └── lưu kết quả → sources.json
+    │
+    ├── [2/5] cmd_synthesize()           # gọi Claude Code CLI
+    │         ├── đọc sources.json
+    │         ├── sp.run(["claude", "-p", prompt, ...])  # spawn process con
+    │         ├── _extract_json(stdout)  # parse JSON từ output
+    │         └── lưu → content.json
+    │
+    ├── [3/5] cmd_build_image()          # tạo ảnh thumbnail
+    │         ├── đọc content.json
+    │         ├── PIL.Image.new(...)     # vẽ ảnh 1200×628
+    │         ├── _draw_wrapped_text()  # viết tiêu đề lên ảnh
+    │         ├── lưu → output/images/{job_id}_card.jpg
+    │         └── ghi lại image_path vào content.json
+    │
+    ├── [4/5] cmd_build_video()          # tạo video TikTok
+    │         ├── đọc content.json
+    │         ├── build_video()          # TTS + ghép video bằng FFmpeg
+    │         └── ghi lại video_path vào content.json
+    │
+    └── [5/5] cmd_publish()              # đăng lên Facebook
+              ├── đọc content.json
+              ├── FacebookPublisher().publish()
+              │   ├── _publish_photo()  # nếu có image_path
+              │   └── _publish_text()   # nếu không có ảnh
+              └── in kết quả post_id / URL
+```
+
+Mỗi bước truyền dữ liệu qua file JSON trung gian:
+
+```
+[1/5] gather          [2/5] synthesize      [3/5] build-image     [4/5] build-video
+     │                      │                      │                      │
+     └──> sources.json ────>└──> content.json ────>└── content.json ──── >└── content.json
+                                                        (+ image_path)        (+ video_path)
+                                                                                    │
+                                                                             [5/5] publish
+                                                                                    │
+                                                                             Facebook API
+```
+
+> **Lưu ý subprocess:** Bước `[2/5]` không gọi thư viện Python mà **spawn một process mới** chạy `claude -p <prompt>` — giống gõ lệnh tay trong terminal. Claude Code dùng subscription login của bạn (`~/.claude/`), không cần `ANTHROPIC_API_KEY`. Output trả về qua `stdout` rồi được parse thành JSON.
 
 ---
 
